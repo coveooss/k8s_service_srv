@@ -1,0 +1,4 @@
+dnspython
+click
+kubernetes
+boto3

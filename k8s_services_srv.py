@@ -1,10 +1,11 @@
 import boto3
 import click
-from kubernetes import config, client, watch
+from kubernetes import config as k8s_config, client, watch
 import logging
 import urllib.request
 import json
 import dns.resolver
+import urllib3
 
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
@@ -12,12 +13,17 @@ K8S_V1_CLIENT = client.CoreV1Api()
 
 def get_k8s_config():
     try:
-        config.load_kube_config(context='k8s.dev.cloud.coveo.com')
-    except:
-        logging.info('Using kubernetes "In Cluster" config')
-        config.load_incluster_config()
+        k8s_config.load_kube_config()
+    except Exception as e:
+        logging.info(
+            'Error using local config ({}), try using kubernetes "In Cluster" config'.format(e))
+        try:
+            k8s_config.load_incluster_config()
+        except Exception as e:
+            logging.error('No k8s config suitable, exiting ({})'.format(e))
+            exit(-1)
     else:
-        logging.info('Using kubernetes local config')
+        logging.info('Using Kubernetes local configuration')
 
 
 def get_dns_value(record, dns_type):
@@ -126,13 +132,19 @@ def list_dns_services(srv_record):
 def main(region, label_selector, namespace, srv_record, r53_zone_id):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-    get_k8s_config()
     global K8S_V1_CLIENT
-    K8S_V1_CLIENT = client.CoreV1Api()
-    w = watch.Watch()
+    try:
+        get_k8s_config()
+        K8S_V1_CLIENT = client.CoreV1Api()
+        w = watch.Watch()
+    except Exception as e:
+        logging.error("Error connection k8s API {}".format(e))
+        exit(-1)
 
     logging.info("Watching k8s API for serice change")
-    for event in w.stream(K8S_V1_CLIENT.list_namespaced_service, namespace=namespace, label_selector=label_selector):
+    stream = w.stream(K8S_V1_CLIENT.list_namespaced_service,
+                      namespace=namespace, label_selector=label_selector)
+    for event in stream:
         logging.info(
             'K8s service modification detected ({} : {})'.format(event['type'], event['object']._metadata.name))
         k8s_services = list_k8s_services(namespace, label_selector)
@@ -147,4 +159,5 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
 
 
 if __name__ == '__main__':
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     main()

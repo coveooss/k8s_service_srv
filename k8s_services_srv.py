@@ -140,11 +140,12 @@ def list_k8s_services(namespace, label_selector):
             namespace=namespace, label_selector=label_selector)
         for item in service.items:
             server = get_k8s_endpoint_node(item.metadata.name, namespace)
-            for port in item._spec._ports:
-                services_list.append({
-                    "server": server,
-                    "port": port.node_port
-                })
+            if server:
+                for port in item._spec._ports:
+                    services_list.append({
+                        "server": server,
+                        "port": port.node_port
+                    })
         return services_list
     except Exception as e:
         logging.error("Unexpected k8s API response : {}".format(e))
@@ -159,12 +160,17 @@ def get_k8s_endpoint_node(name, namespace):
         logging.error(
             "Unexpected k8s API response : {}".format(e))
         exit(1)
-    if (len(node_name._items) > 1):
+    if (len(node_name._items) > 1 or len(node_name._items) == 0):
         logging.error(
-            "Unexpected k8s Endpoint response, too many endpoints matching name: {}".format(name))
-        exit(1)
+            "Unexpected k8s Endpoint response for endpoints matching name: {}".format(name))
+        return ""
     else:
-        return node_name._items[0]._subsets[0]._addresses[0].node_name
+        try:
+            return node_name._items[0]._subsets[0]._addresses[0].node_name
+        except Exception as e:
+            logging.error(
+                "k8s endpoints return an unexpected server ({})".format(e))
+            return ""
 
 
 @click.command()
@@ -199,7 +205,6 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
         k8s_services[api_endpoint] = list_k8s_services(
             namespace, label_selector)
 
-        # TODO Search cluster in Array + no endpoint sur k8s_get
         all_dns_values = get_r53_services(srv_record, r53_zone_id)
         logging.info("Values in route53 TXT record {} : {}".format(
             srv_record, all_dns_values))

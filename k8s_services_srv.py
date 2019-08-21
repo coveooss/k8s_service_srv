@@ -82,6 +82,7 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
 
     i = 0
 
+    # If the DNS records a not yet created, we need to set it by default
     if len(all_services) == 0:
         all_services = [k8s_services]
 
@@ -137,6 +138,7 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
 
 
 def list_k8s_services(namespace, label_selector):
+    # Get the k8s service with specific labels
     services_list = []
     try:
         service = K8S_V1_CLIENT.list_namespaced_service(
@@ -156,6 +158,7 @@ def list_k8s_services(namespace, label_selector):
 
 
 def get_k8s_endpoint_node(name, namespace):
+    # Get the node hosting the PODs
     try:
         node_name = K8S_V1_CLIENT.list_namespaced_endpoints(
             namespace=namespace, field_selector="metadata.name={}".format(name))
@@ -207,17 +210,18 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
         k8s_services = {}
         k8s_services[api_endpoint] = list_k8s_services(
             namespace, label_selector)
-
+        # Get all services for all clusters in the DNS TXT record
         all_dns_values = get_r53_services(srv_record, r53_zone_id)
         logging.info("Values in route53 TXT record {} : {}".format(
             srv_record, all_dns_values))
 
+        # Get the current cluster values
         dns_services = {}
         for dns_value in all_dns_values:
             if api_endpoint in dns_value.keys():
                 dns_services = dns_value
                 break
-
+        # If DNS modification is needed
         if k8s_services != dns_services:
             logging.info('DNS modification needed {} -> {}'.format(
                 dns_services, k8s_services))

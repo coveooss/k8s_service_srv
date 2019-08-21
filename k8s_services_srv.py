@@ -54,6 +54,7 @@ def get_r53_services(dns_record, r53_zone_id):
                     decoded_value = decode_b64(raw_value)
                     services.append(json.loads(decoded_value))
                 return services
+        return services
 
 
 def encode_b64(value):
@@ -81,6 +82,9 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
 
     i = 0
 
+    if len(all_services) == 0:
+        all_services = [k8s_services]
+
     for all_cluster_endpoints in all_services:
         if api_endpoint in all_cluster_endpoints.keys():
             services = k8s_services
@@ -94,7 +98,6 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
                 i += 1
                 srv_record.append({"Value": "{} {} {} {}".format(
                     i, priority, endpoint['port'], endpoint['server'])})
-    print(txt_record)
     try:
         r53 = boto3.client('route53')
         response = r53.change_resource_record_sets(
@@ -208,16 +211,16 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
         all_dns_values = get_r53_services(srv_record, r53_zone_id)
         logging.info("Values in route53 TXT record {} : {}".format(
             srv_record, all_dns_values))
+
+        dns_services = {}
         for dns_value in all_dns_values:
             if api_endpoint in dns_value.keys():
                 dns_services = dns_value
                 break
-            else:
-                dns_services = []
 
         if k8s_services != dns_services:
-            logging.info('DNS modification needed {}'.format(
-                dns_services))
+            logging.info('DNS modification needed {} -> {}'.format(
+                dns_services, k8s_services))
             update_r53_serviceendpoints(
                 srv_record, api_endpoint, k8s_services, all_dns_values, r53_zone_id)
         else:

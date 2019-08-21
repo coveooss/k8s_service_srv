@@ -3,7 +3,6 @@ import click
 from kubernetes import config as k8s_config, client, watch
 import logging
 import urllib3
-import urllib.request
 import json
 import base64
 import bz2

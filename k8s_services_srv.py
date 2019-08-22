@@ -1,3 +1,4 @@
+import time
 import boto3
 import click
 from kubernetes import config as k8s_config, client, watch
@@ -41,19 +42,25 @@ def get_r53_services(dns_record, r53_zone_id):
             'DNS record {} has not been found : {}'.format(dns_record, e))
         exit(-1)
     else:
-        services = []
-        # Parse all DNS from r53 answers
-        for response in responses['ResourceRecordSets']:
-            if response['Name'] == dns_record and response['Type'] == 'TXT':
-                # Parse all values (for each cluster)
-                for service in response['ResourceRecords']:
-                    # remove trailing quotes
-                    raw_value = (service['Value'])[1:-1]
-                    # Convert raw compressed, base64 value to json
-                    decoded_value = decode_b64(raw_value)
-                    services.append(json.loads(decoded_value))
-                return services
-        return services
+        if responses['ResponseMetadata']['HTTPStatusCode'] == 200:
+            services = []
+            # Parse all DNS from r53 answers
+            for response in responses['ResourceRecordSets']:
+                if response['Name'] == dns_record and response['Type'] == 'TXT':
+                    # Parse all values (for each cluster)
+                    for service in response['ResourceRecords']:
+                        # remove trailing quotes
+                        raw_value = (service['Value'])[1:-1]
+                        # Convert raw compressed, base64 value to json
+                        decoded_value = decode_b64(raw_value)
+                        services.append(json.loads(decoded_value))
+                    return services
+            return services
+        elif responses['ResponseMetadata']['HTTPStatusCode'] == 400:
+            # If AWS route 53 Throtle the request, we return null and retry in the main loop
+            logging.warning("route53 throttle on call {}".format(
+                responses['ResponseMetadata']['RequestId']))
+            return None
 
 
 def encode_b64(value):
@@ -85,12 +92,13 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
     if len(all_services) == 0:
         all_services = [k8s_services]
 
+    # Parsing all clusters found in the TXT record, looking for the current cluster
     for all_cluster_endpoints in all_services:
         if api_endpoint in all_cluster_endpoints.keys():
             services = k8s_services
         else:
             services = all_cluster_endpoints
-
+        # Generatin TXT and SRV values
         txt_record.append({"Value": '"{}"'.format(
             encode_b64(json.dumps(services)))})
         for endpoints in services.values():
@@ -99,6 +107,7 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
                 srv_record.append({"Value": "{} {} {} {}".format(
                     i, priority, endpoint['port'], endpoint['server'])})
     try:
+        # Updating both DNS records in one batch
         r53 = boto3.client('route53')
         response = r53.change_resource_record_sets(
             HostedZoneId=r53_zone_id,
@@ -127,13 +136,19 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
             'DNS record {} has not been updated : {}'.format(srv_record_name, e))
         print(e)
     else:
-        if response['ResponseMetadata']['HTTPStatusCode'] != 200:
+        # If AWS route 53 Throtle the request, we return null and retry in the main loop
+        if response['ResponseMetadata']['HTTPStatusCode'] == 400:
+            logging.warning("route53 throttle on call {}".format(
+                response['ResponseMetadata']['RequestId']))
+            return None
+        elif response['ResponseMetadata']['HTTPStatusCode'] != 200:
             logging.error("Error updating r53 DNS record {} (request ID : {}".format(
                 srv_record_name, response['ResponseMetadata']['RequestId']))
             exit(1)
         else:
             logging.info('Updating DNS record {} ({})'.format(
                 srv_record_name, response['ResponseMetadata']['RequestId']))
+            return True
 
 
 def list_k8s_services(namespace, label_selector):
@@ -188,6 +203,9 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
+
+    R53_RETRY = 10
+
     try:
         get_k8s_config()
         K8S_V1_CLIENT = client.CoreV1Api()
@@ -211,6 +229,18 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
             namespace, label_selector)
         # Get all services for all clusters in the DNS TXT record
         all_dns_values = get_r53_services(srv_record, r53_zone_id)
+        t = 0
+        # In case of route53 throttle, we retry the DNS call
+        while all_dns_values == None and t < R53_RETRY:
+            t += 1
+            all_dns_values = get_r53_services(srv_record, r53_zone_id)
+            if all_dns_values == None:
+                logging.info("Waiting for {} seconds".format(t*t))
+                time.sleep(t*t)
+            if t == R53_RETRY:
+                logging.error("Error getting r53 info, exiting")
+                exit(-1)
+
         logging.info("Values in route53 TXT record {} : {}".format(
             srv_record, all_dns_values))
 
@@ -224,11 +254,23 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
         if k8s_services != dns_services:
             logging.info('DNS modification needed {} -> {}'.format(
                 dns_services, k8s_services))
-            update_r53_serviceendpoints(
+            updated = update_r53_serviceendpoints(
                 srv_record, api_endpoint, k8s_services, all_dns_values, r53_zone_id)
+            # In case of route53 throttle, we retry the DNS call
+            t = 0
+            while updated == None and t < R53_RETRY:
+                t += 1
+                updated = update_r53_serviceendpoints(
+                    srv_record, api_endpoint, k8s_services, all_dns_values, r53_zone_id)
+                if updated == None:
+                    logging.info("Waiting for {} seconds".format(t*t))
+                    time.sleep(t*t)
+                if t == R53_RETRY:
+                    logging.error("Error updating r53 info, exiting")
+                    exit(-1)
         else:
             logging.info(
-                'K8s service modification detected - no update required')
+                'K8s service modification detected but no DNS update is required')
 
 
 if __name__ == '__main__':

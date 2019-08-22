@@ -10,6 +10,8 @@ import bz2
 
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
+# Constants
+R53_RETRY = 10
 
 
 def get_k8s_config():
@@ -204,8 +206,6 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
 
-    R53_RETRY = 10
-
     try:
         get_k8s_config()
         K8S_V1_CLIENT = client.CoreV1Api()
@@ -237,7 +237,7 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
             if all_dns_values == None:
                 logging.info("Waiting for {} seconds".format(t*t))
                 time.sleep(t*t)
-            if t == R53_RETRY:
+            if t >= R53_RETRY:
                 logging.error("Error getting r53 info, exiting")
                 exit(-1)
 
@@ -265,7 +265,7 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
                 if updated == None:
                     logging.info("Waiting for {} seconds".format(t*t))
                     time.sleep(t*t)
-                if t == R53_RETRY:
+                if t >= R53_RETRY:
                     logging.error("Error updating r53 info, exiting")
                     exit(-1)
         else:

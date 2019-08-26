@@ -94,6 +94,7 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
     if len(all_services) == 0:
         all_services = [k8s_services]
     else:
+        # If the cluster is not yet in the list of clusters, we add it the the list
         if next((item for item in all_services if item.keys() == api_endpoint), None) == None:
             all_services.append(k8s_services)
 

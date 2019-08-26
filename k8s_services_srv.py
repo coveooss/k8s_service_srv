@@ -93,6 +93,10 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
     # If the DNS records a not yet created, we need to set it by default
     if len(all_services) == 0:
         all_services = [k8s_services]
+    else:
+        # If the cluster is not yet in the list of clusters, we add it the the list
+        if next((item for item in all_services if item.keys() == api_endpoint), None) == None:
+            all_services.append(k8s_services)
 
     # Parsing all clusters found in the TXT record, looking for the current cluster
     for all_cluster_endpoints in all_services:
@@ -190,8 +194,8 @@ def get_k8s_endpoint_node(name, namespace):
         try:
             return node_name._items[0]._subsets[0]._addresses[0].node_name
         except Exception as e:
-            logging.error(
-                "k8s endpoints return an unexpected server ({})".format(e))
+            logging.warn(
+                "k8s endpoints have no target ({})".format(e))
             return ""
 
 
@@ -201,7 +205,8 @@ def get_k8s_endpoint_node(name, namespace):
 @click.option("--namespace", default="kube-system", help="Specify the service labels to monitor")
 @click.option("--srv_record", required=True, default=None, help="Specify DNS service record to update")
 @click.option("--r53_zone_id", required=True, default=None, help="Specify route 53 DNS service record to update")
-def main(region, label_selector, namespace, srv_record, r53_zone_id):
+@click.option("--k8s_endpoint_name", required=False, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
+def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
@@ -210,8 +215,12 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id):
         get_k8s_config()
         K8S_V1_CLIENT = client.CoreV1Api()
         w = watch.Watch()
-        api_endpoint_url = w._api_client.configuration.host
-        api_endpoint = api_endpoint_url.replace('https://', "")
+        if not k8s_endpoint_name:
+            api_endpoint_url = w._api_client.configuration.host
+            api_endpoint = api_endpoint_url.replace('https://', "")
+        else:
+            api_endpoint = k8s_endpoint_name
+
     except Exception as e:
         logging.error("Error connection k8s API {}".format(e))
         exit(-1)

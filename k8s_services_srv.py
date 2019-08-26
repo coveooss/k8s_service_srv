@@ -193,8 +193,8 @@ def get_k8s_endpoint_node(name, namespace):
         try:
             return node_name._items[0]._subsets[0]._addresses[0].node_name
         except Exception as e:
-            logging.error(
-                "k8s endpoints return an unexpected server ({})".format(e))
+            logging.warn(
+                "k8s endpoints have no target ({})".format(e))
             return ""
 
 

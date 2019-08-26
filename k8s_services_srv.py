@@ -204,7 +204,7 @@ def get_k8s_endpoint_node(name, namespace):
 @click.option("--namespace", default="kube-system", help="Specify the service labels to monitor")
 @click.option("--srv_record", required=True, default=None, help="Specify DNS service record to update")
 @click.option("--r53_zone_id", required=True, default=None, help="Specify route 53 DNS service record to update")
-@click.option("--k8s_endpoint_name", required=True, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
+@click.option("--k8s_endpoint_name", required=False, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
 def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)

@@ -55,6 +55,7 @@ def get_r53_services(dns_record, r53_zone_id):
                         raw_value = (service['Value'])[1:-1]
                         # Convert raw compressed, base64 value to json
                         decoded_value = decode_b64(raw_value)
+                        # If the TXT record can't be converted to json, it's corrupted, so ignored
                         try:
                             services.append(json.loads(decoded_value))
                         except:

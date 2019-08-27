@@ -6,7 +6,7 @@ import logging
 import urllib3
 import json
 import base64
-import bz2
+import gzip
 
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
@@ -55,7 +55,12 @@ def get_r53_services(dns_record, r53_zone_id):
                         raw_value = (service['Value'])[1:-1]
                         # Convert raw compressed, base64 value to json
                         decoded_value = decode_b64(raw_value)
-                        services.append(json.loads(decoded_value))
+                        # If the TXT record can't be converted to json, it's corrupted, so ignored
+                        try:
+                            services.append(json.loads(decoded_value))
+                        except:
+                            logging.warning(
+                                "Unable to load TXT service into json")
                     return services
             return services
         elif responses['ResponseMetadata']['HTTPStatusCode'] == 400:
@@ -68,7 +73,7 @@ def get_r53_services(dns_record, r53_zone_id):
 def encode_b64(value):
     # Compress and encode a string to avoid special characters
     return base64.urlsafe_b64encode(
-        bz2.compress(
+        gzip.compress(
             value.encode('utf-8')
         )
     ).decode('utf-8')
@@ -76,11 +81,15 @@ def encode_b64(value):
 
 def decode_b64(value):
     # Decompress and decode a string to avoid special characters
-    return bz2.decompress(
-        base64.urlsafe_b64decode(
-            value.encode('utf-8')
-        )
-    ).decode('utf-8')
+    try:
+        return gzip.decompress(
+            base64.urlsafe_b64decode(
+                value.encode('utf-8')
+            )
+        ).decode('utf-8')
+    except Exception as e:
+        logging.warning("Unable to decode {}".format(value))
+        return None
 
 
 def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all_services, r53_zone_id):
@@ -194,7 +203,7 @@ def get_k8s_endpoint_node(name, namespace):
         try:
             return node_name._items[0]._subsets[0]._addresses[0].node_name
         except Exception as e:
-            logging.warn(
+            logging.warning(
                 "k8s endpoints have no target ({})".format(e))
             return ""
 

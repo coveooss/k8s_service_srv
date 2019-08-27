@@ -55,7 +55,11 @@ def get_r53_services(dns_record, r53_zone_id):
                         raw_value = (service['Value'])[1:-1]
                         # Convert raw compressed, base64 value to json
                         decoded_value = decode_b64(raw_value)
-                        services.append(json.loads(decoded_value))
+                        try:
+                            services.append(json.loads(decoded_value))
+                        except:
+                            logging.warning(
+                                "Unable to load TXT service into json")
                     return services
             return services
         elif responses['ResponseMetadata']['HTTPStatusCode'] == 400:
@@ -76,11 +80,15 @@ def encode_b64(value):
 
 def decode_b64(value):
     # Decompress and decode a string to avoid special characters
-    return gzip.decompress(
-        base64.urlsafe_b64decode(
-            value.encode('utf-8')
-        )
-    ).decode('utf-8')
+    try:
+        return gzip.decompress(
+            base64.urlsafe_b64decode(
+                value.encode('utf-8')
+            )
+        ).decode('utf-8')
+    except Exception as e:
+        logging.warning("Unable to decode {}".format(value))
+        return None
 
 
 def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all_services, r53_zone_id):

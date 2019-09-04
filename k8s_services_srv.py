@@ -243,8 +243,11 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoin
 
         # Get services in k8s
         k8s_services = {}
-        k8s_services[api_endpoint] = list_k8s_services(
-            namespace, label_selector)
+        endpoints = list_k8s_services(namespace, label_selector)
+        # If cluster have no valid erndpoint, we ignore it
+        if len(endpoints) > 0:
+            k8s_services[api_endpoint] = endpoints
+
         # Get all services for all clusters in the DNS TXT record
         all_dns_values = get_r53_services(srv_record, r53_zone_id)
         t = 0

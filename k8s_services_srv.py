@@ -110,7 +110,13 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
     # Parsing all clusters found in the TXT record, looking for the current cluster
     for all_cluster_endpoints in all_services:
         if api_endpoint in all_cluster_endpoints.keys():
-            services = k8s_services
+            # if no endpoint is available in the cluster at the time, we jump to the next one
+            if len(k8s_services[api_endpoint]) < 1:
+                logging.info(
+                    "No endpoint available for cluster {}".format(api_endpoint))
+                break
+            else:
+                services = k8s_services
         else:
             services = all_cluster_endpoints
         # Generatin TXT and SRV values

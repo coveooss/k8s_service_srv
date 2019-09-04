@@ -181,8 +181,7 @@ def list_k8s_services(namespace, label_selector):
                         "port": port.node_port
                     })
             return services_list
-        else:
-            return []
+
     except Exception as e:
         logging.error("Unexpected k8s API response : {}".format(e))
         exit(1)

@@ -110,13 +110,7 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
     # Parsing all clusters found in the TXT record, looking for the current cluster
     for all_cluster_endpoints in all_services:
         if api_endpoint in all_cluster_endpoints.keys():
-            # if no endpoint is available in the cluster at the time, we jump to the next one
-            if len(k8s_services[api_endpoint]) < 1:
-                logging.info(
-                    "No endpoint available for cluster {}".format(api_endpoint))
-                break
-            else:
-                services = k8s_services
+            services = k8s_services
         else:
             services = all_cluster_endpoints
         # Generatin TXT and SRV values
@@ -186,7 +180,9 @@ def list_k8s_services(namespace, label_selector):
                         "server": server,
                         "port": port.node_port
                     })
-        return services_list
+            return services_list
+        else:
+            return []
     except Exception as e:
         logging.error("Unexpected k8s API response : {}".format(e))
         exit(1)
@@ -249,8 +245,11 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoin
 
         # Get services in k8s
         k8s_services = {}
-        k8s_services[api_endpoint] = list_k8s_services(
-            namespace, label_selector)
+        endpoints = list_k8s_services(namespace, label_selector)
+        # If cluster have no valid erndpoint, we ignore it
+        if len(endpoints) > 0:
+            k8s_services[api_endpoint] = endpoints
+
         # Get all services for all clusters in the DNS TXT record
         all_dns_values = get_r53_services(srv_record, r53_zone_id)
         t = 0

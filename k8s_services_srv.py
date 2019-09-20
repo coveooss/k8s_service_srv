@@ -7,6 +7,9 @@ import urllib3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key, Attr
 
+# Global variable
+K8S_V1_CLIENT = client.CoreV1Api()
+
 # Constants
 R53_RETRY = 10
 

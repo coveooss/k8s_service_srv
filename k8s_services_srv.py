@@ -1,12 +1,12 @@
+import time
 import boto3
+import click
+from kubernetes import config as k8s_config, client, watch
+import logging
+import urllib3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key, Attr
-import json
-import logging
-import time
-import click
-import urllib3
-from kubernetes import config as k8s_config, client, watch
+
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 table = dynamodb.Table('ndev-r53resolver')

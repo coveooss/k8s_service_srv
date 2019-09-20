@@ -7,12 +7,11 @@ import urllib3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key, Attr
 
+# Constants
+R53_RETRY = 10
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 table = dynamodb.Table('ndev-r53resolver')
-
-# Constants
-R53_RETRY = 10
 
 
 def update_r53_serviceendpoints(srv_record_name, r53_zone_id):

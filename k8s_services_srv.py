@@ -14,6 +14,21 @@ dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 table = dynamodb.Table('ndev-r53resolver')
 
 
+def get_k8s_config():
+    # Try to get k8s local config or use incluster one
+    try:
+        k8s_config.load_kube_config()
+    except Exception as e:
+        logging.info(
+            'Error using local config ({}), try using kubernetes "In Cluster" config'.format(e))
+        try:
+            k8s_config.load_incluster_config()
+        except Exception as e:
+            raise(Exception('No k8s config suitable, exiting ({})'.format(e)))
+    else:
+        logging.info('Using Kubernetes local configuration')
+
+
 def update_r53_serviceendpoints(srv_record_name, r53_zone_id):
     priority = 10
     response = table.scan()
@@ -114,21 +129,6 @@ def del_dynamo_cluster_backend(cluster, endpoint):
         logging.info("Endpoint {} successfully deleted from DynamoDB (ID : {})".format(
             bdd_value, response['ResponseMetadata']['RequestId']))
         return True
-
-
-def get_k8s_config():
-    # Try to get k8s local config or use incluster one
-    try:
-        k8s_config.load_kube_config()
-    except Exception as e:
-        logging.info(
-            'Error using local config ({}), try using kubernetes "In Cluster" config'.format(e))
-        try:
-            k8s_config.load_incluster_config()
-        except Exception as e:
-            raise(Exception('No k8s config suitable, exiting ({})'.format(e)))
-    else:
-        logging.info('Using Kubernetes local configuration')
 
 
 def list_k8s_services(namespace, label_selector):

@@ -4,14 +4,17 @@ import click
 from kubernetes import config as k8s_config, client, watch
 import logging
 import urllib3
-import json
-import base64
-import gzip
+from botocore.exceptions import ClientError
+from boto3.dynamodb.conditions import Key, Attr
 
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
+
 # Constants
 R53_RETRY = 10
+
+dynamodb = boto3.resource('dynamodb')
+dynamodb_client = boto3.client('dynamodb')
 
 
 def get_k8s_config():
@@ -24,105 +27,29 @@ def get_k8s_config():
         try:
             k8s_config.load_incluster_config()
         except Exception as e:
-            logging.error('No k8s config suitable, exiting ({})'.format(e))
-            exit(-1)
+            raise(Exception('No k8s config suitable, exiting ({})'.format(e)))
     else:
         logging.info('Using Kubernetes local configuration')
 
 
-def get_r53_services(dns_record, r53_zone_id):
-    # Collect TXT record information for multi-cluster infos
-    try:
-        r53 = boto3.client('route53')
-        responses = r53.list_resource_record_sets(
-            HostedZoneId=r53_zone_id,
-            StartRecordName=dns_record,
-            StartRecordType='TXT',
-        )
-    except Exception as e:
-        logging.error(
-            'DNS record {} has not been found : {}'.format(dns_record, e))
-        exit(-1)
-    else:
-        if responses['ResponseMetadata']['HTTPStatusCode'] == 200:
-            services = []
-            # Parse all DNS from r53 answers
-            for response in responses['ResourceRecordSets']:
-                if response['Name'] == dns_record and response['Type'] == 'TXT':
-                    # Parse all values (for each cluster)
-                    for service in response['ResourceRecords']:
-                        # remove trailing quotes
-                        raw_value = (service['Value'])[1:-1]
-                        # Convert raw compressed, base64 value to json
-                        decoded_value = decode_b64(raw_value)
-                        # If the TXT record can't be converted to json, it's corrupted, so ignored
-                        try:
-                            services.append(json.loads(decoded_value))
-                        except:
-                            logging.warning(
-                                "Unable to load TXT service into json")
-                    return services
-            return services
-        elif responses['ResponseMetadata']['HTTPStatusCode'] == 400:
-            # If AWS route 53 Throtle the request, we return null and retry in the main loop
-            logging.warning("route53 throttle on call {}".format(
-                responses['ResponseMetadata']['RequestId']))
-            return None
-
-
-def encode_b64(value):
-    # Compress and encode a string to avoid special characters
-    return base64.urlsafe_b64encode(
-        gzip.compress(
-            value.encode('utf-8')
-        )
-    ).decode('utf-8')
-
-
-def decode_b64(value):
-    # Decompress and decode a string to avoid special characters
-    try:
-        return gzip.decompress(
-            base64.urlsafe_b64decode(
-                value.encode('utf-8')
-            )
-        ).decode('utf-8')
-    except Exception as e:
-        logging.warning("Unable to decode {}".format(value))
-        return None
-
-
-def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all_services, r53_zone_id):
+def update_r53_serviceendpoints(srv_record_name, r53_zone_id):
     priority = 10
+    response = table.scan()
+    datas = response['Items']
     srv_record = []
-    txt_record = []
-
     i = 0
-
-    # If the DNS records a not yet created, we need to set it by default
-    if len(all_services) == 0:
-        all_services = [k8s_services]
+    if len(datas) > 0:
+        for data in datas:
+            i += 1
+            endpoint_dict = (data['endpoint']).split(':')
+            srv_record.append({"Value": "{} {} {} {}".format(
+                i, priority, endpoint_dict[1], endpoint_dict[0])})
     else:
-        # If the cluster is not yet in the list of clusters, we add it the the list
-        if next((item for item in all_services if api_endpoint in item.keys()), None) == None:
-            all_services.append(k8s_services)
+        # No data in DynamoDB
+        logging.info("No data in DynamoDB backend, skipping synchro")
+        return True
 
-    # Parsing all clusters found in the TXT record, looking for the current cluster
-    for all_cluster_endpoints in all_services:
-        if api_endpoint in all_cluster_endpoints.keys():
-            services = k8s_services
-        else:
-            services = all_cluster_endpoints
-        # Generatin TXT and SRV values
-        txt_record.append({"Value": '"{}"'.format(
-            encode_b64(json.dumps(services)))})
-        for endpoints in services.values():
-            for endpoint in endpoints:
-                i += 1
-                srv_record.append({"Value": "{} {} {} {}".format(
-                    i, priority, endpoint['port'], endpoint['server'])})
     try:
-        # Updating both DNS records in one batch
         r53 = boto3.client('route53')
         response = r53.change_resource_record_sets(
             HostedZoneId=r53_zone_id,
@@ -134,36 +61,78 @@ def update_r53_serviceendpoints(srv_record_name, api_endpoint, k8s_services, all
                         'Type': 'SRV',
                         'TTL': 300,
                         'ResourceRecords': srv_record
-                    }},
-                    {
-                    'Action': 'UPSERT',
-                    'ResourceRecordSet': {
-                        'Name': srv_record_name,
-                        'Type': 'TXT',
-                        'TTL': 300,
-                        'ResourceRecords': txt_record
                     }}
                 ]
             })
-
     except Exception as e:
         logging.error(
             'DNS record {} has not been updated : {}'.format(srv_record_name, e))
-        print(e)
+        raise(e)
     else:
         # If AWS route 53 Throtle the request, we return null and retry in the main loop
         if response['ResponseMetadata']['HTTPStatusCode'] == 400:
             logging.warning("route53 throttle on call {}".format(
                 response['ResponseMetadata']['RequestId']))
-            return None
+            return False
         elif response['ResponseMetadata']['HTTPStatusCode'] != 200:
-            logging.error("Error updating r53 DNS record {} (request ID : {}".format(
-                srv_record_name, response['ResponseMetadata']['RequestId']))
-            exit(1)
+            raise(Exception("Error updating r53 DNS record {} (request ID : {}".format(
+                srv_record_name, response['ResponseMetadata']['RequestId'])))
         else:
             logging.info('Updating DNS record {} ({})'.format(
                 srv_record_name, response['ResponseMetadata']['RequestId']))
             return True
+
+
+def get_dynamo_cluster_services(k8s_endpoint):
+    try:
+        response = table.query(
+            IndexName='cluster-index',
+            KeyConditionExpression=Key('cluster').eq(k8s_endpoint)
+        )
+    except ClientError as e:
+        raise(e)
+    else:
+        items = response['Items']
+        cluster = []
+        for item in items:
+            endpoint_obj = (item['endpoint']).split(':')
+            cluster.append(
+                {'server': endpoint_obj[0], 'port': int(endpoint_obj[1])})
+
+        return({k8s_endpoint: cluster})
+
+
+def add_dynamo_cluster_backend(cluster, endpoint):
+    try:
+        bdd_value = "{}:{}".format(endpoint['server'], endpoint['port'])
+        response = table.put_item(
+            Item={
+                'endpoint': bdd_value,
+                'cluster': cluster
+            }
+        )
+    except Exception as e:
+        raise(e)
+    else:
+        logging.info("Endpoint {} successfully added to DynamoDB (ID : {})".format(
+            bdd_value, response['ResponseMetadata']['RequestId']))
+        return True
+
+
+def del_dynamo_cluster_backend(cluster, endpoint):
+    bdd_value = "{}:{}".format(endpoint['server'], endpoint['port'])
+    try:
+        response = table.delete_item(
+            Key={
+                'endpoint': bdd_value
+            }
+        )
+    except ClientError as e:
+        raise(e)
+    else:
+        logging.info("Endpoint {} successfully deleted from DynamoDB (ID : {})".format(
+            bdd_value, response['ResponseMetadata']['RequestId']))
+        return True
 
 
 def list_k8s_services(namespace, label_selector):
@@ -182,8 +151,7 @@ def list_k8s_services(namespace, label_selector):
                     })
         return services_list
     except Exception as e:
-        logging.error("Unexpected k8s API response : {}".format(e))
-        exit(1)
+        raise(Exception("Unexpected k8s API response : {}".format(e)))
 
 
 def get_k8s_endpoint_node(name, namespace):
@@ -192,9 +160,8 @@ def get_k8s_endpoint_node(name, namespace):
         node_name = K8S_V1_CLIENT.list_namespaced_endpoints(
             namespace=namespace, field_selector="metadata.name={}".format(name))
     except Exception as e:
-        logging.error(
-            "Unexpected k8s API response : {}".format(e))
-        exit(1)
+        raise(Exception("Unexpected k8s API response : {}".format(e)))
+
     if (len(node_name._items) > 1 or len(node_name._items) == 0):
         logging.error(
             "Unexpected k8s Endpoint response for endpoints matching name: {}".format(name))
@@ -208,6 +175,65 @@ def get_k8s_endpoint_node(name, namespace):
             return ""
 
 
+def diff(listA, listB):
+    return [i for i in listA if i not in listB]
+
+
+def create_dynamo_table(dynamodb_table_name):
+    try:
+        table = dynamodb.create_table(
+            TableName=dynamodb_table_name,
+            KeySchema=[
+                {
+                    'AttributeName': 'endpoint',
+                    'KeyType': 'HASH'  # Partition key
+                },
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'cluster-index',
+                    'KeySchema': [
+                        {
+                            'AttributeName': 'cluster',
+                            'KeyType': 'HASH'
+                        },
+                    ],
+                    'Projection': {
+                        'ProjectionType': 'ALL'
+                    },
+                    'ProvisionedThroughput': {
+                        'ReadCapacityUnits': 5,
+                        'WriteCapacityUnits': 5
+                    }
+                },
+            ],
+            AttributeDefinitions=[
+                {
+                    'AttributeName': 'endpoint',
+                    'AttributeType': 'S'
+                },
+                {
+                    'AttributeName': 'cluster',
+                    'AttributeType': 'S'
+                }
+            ],
+            ProvisionedThroughput={
+                'ReadCapacityUnits': 5,
+                'WriteCapacityUnits': 5
+            }
+        )
+        logging.info('Creating DynamoDB table {} ...'.format(
+            dynamodb_table_name))
+        waiter = dynamodb_client.get_waiter('table_exists')
+        waiter.wait(TableName=dynamodb_table_name)
+        logging.info('DynamoDB table {} is created.'.format(
+            dynamodb_table_name))
+    except Exception as e:
+        raise(e)
+    else:
+        return True
+
+
 @click.command()
 @click.option("--region", "-r", default=None, help="Region where to run the script")
 @click.option("--label_selector", default="", help="Specify the service labels to monitor")
@@ -215,10 +241,22 @@ def get_k8s_endpoint_node(name, namespace):
 @click.option("--srv_record", required=True, default=None, help="Specify DNS service record to update")
 @click.option("--r53_zone_id", required=True, default=None, help="Specify route 53 DNS service record to update")
 @click.option("--k8s_endpoint_name", required=False, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
-def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name):
+@click.option("--dynamodb_table_name", required=False, default="r53-service-resolver", help="Specify an alternative DynamoDB table name")
+def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
+    global table
+
+    # Check if Dynamo DB Table exists
+    try:
+        dynamodb_client.describe_table(TableName=dynamodb_table_name)
+    except dynamodb_client.exceptions.ResourceNotFoundException:
+        # If not, we create the table
+        create_dynamo_table(dynamodb_table_name)
+    pass
+
+    table = dynamodb.Table(dynamodb_table_name)
 
     try:
         get_k8s_config()
@@ -231,64 +269,63 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoin
             api_endpoint = k8s_endpoint_name
 
     except Exception as e:
-        logging.error("Error connection k8s API {}".format(e))
-        exit(-1)
+        raise(Exception("Error connection k8s API {}".format(e)))
 
     logging.info("Watching k8s API for serice change")
     stream = w.stream(K8S_V1_CLIENT.list_namespaced_service,
                       namespace=namespace, label_selector=label_selector)
+
+    # Do an initial sync between DynamoDB and route53
+    try:
+        logging.info("Performing initial sync between DynamoDB and route53")
+        update_r53_serviceendpoints(srv_record, r53_zone_id)
+    except Exception as e:
+        logging.warning(
+            "Initial synchro failed between DynamoDB and route53")
+
     for event in stream:
         logging.info('K8s service modification detected ({} : {})'.format(
             event['type'], event['object']._metadata.name))
 
-        # Get services in k8s
-        k8s_services = {}
+        service_k8s = {}
         endpoints = list_k8s_services(namespace, label_selector)
         # If cluster have no valid erndpoint, we ignore it
         if len(endpoints) > 0:
-            k8s_services[api_endpoint] = endpoints
+            service_k8s[api_endpoint] = endpoints
 
-        # Get all services for all clusters in the DNS TXT record
-        all_dns_values = get_r53_services(srv_record, r53_zone_id)
-        t = 0
-        # In case of route53 throttle, we retry the DNS call
-        while all_dns_values == None and t < R53_RETRY:
-            t += 1
-            all_dns_values = get_r53_services(srv_record, r53_zone_id)
-            if all_dns_values == None:
-                logging.info("Waiting for {} seconds".format(t*t))
-                time.sleep(t*t)
-            if t >= R53_RETRY:
-                logging.error("Error getting r53 info, exiting")
-                exit(-1)
+        # Collects cluster endpoints in the backend
+        service_backend = get_dynamo_cluster_services(api_endpoint)
 
-        logging.info("Values in route53 TXT record {} : {}".format(
-            srv_record, all_dns_values))
+        backend_updated = False
+        # In k8s but not in backend -> append to backend
+        svc_to_add = diff(service_k8s[api_endpoint],
+                          service_backend[api_endpoint])
+        if len(svc_to_add) > 0:
+            for endpoint in svc_to_add:
+                backend_updated = add_dynamo_cluster_backend(
+                    api_endpoint, endpoint)
 
-        # Get the current cluster values
-        dns_services = {}
-        for dns_value in all_dns_values:
-            if api_endpoint in dns_value.keys():
-                dns_services = dns_value
-                break
-        # If DNS modification is needed
-        if k8s_services != dns_services:
-            logging.info('DNS modification needed {} -> {}'.format(
-                dns_services, k8s_services))
-            updated = update_r53_serviceendpoints(
-                srv_record, api_endpoint, k8s_services, all_dns_values, r53_zone_id)
-            # In case of route53 throttle, we retry the DNS call
-            t = 0
-            while updated == None and t < R53_RETRY:
-                t += 1
-                updated = update_r53_serviceendpoints(
-                    srv_record, api_endpoint, k8s_services, all_dns_values, r53_zone_id)
-                if updated == None:
+        # In backend but not in k8s -> delete in backend
+        endpoint_to_delete = diff(
+            service_backend[api_endpoint], service_k8s[api_endpoint])
+        if len(endpoint_to_delete) > 0:
+            for endpoint in endpoint_to_delete:
+                backend_updated = del_dynamo_cluster_backend(
+                    api_endpoint, endpoint)
+        # If the backend have been updated, r53 sync is needed
+        if backend_updated:
+            try:
+                t = 0
+                # In case of r53 throttle, we wait for some time and try again
+                while not update_r53_serviceendpoints(srv_record, r53_zone_id) and t < R53_RETRY:
+                    t += 1
                     logging.info("Waiting for {} seconds".format(t*t))
                     time.sleep(t*t)
-                if t >= R53_RETRY:
-                    logging.error("Error updating r53 info, exiting")
-                    exit(-1)
+                    if t >= R53_RETRY:
+                        raise(Exception("Error updating r53 info, exiting"))
+
+            except Exception as e:
+                raise(e)
         else:
             logging.info(
                 'K8s service modification detected but no DNS update is required')

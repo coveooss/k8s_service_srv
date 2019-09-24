@@ -32,7 +32,7 @@ def get_k8s_config():
         logging.info('Using Kubernetes local configuration')
 
 
-def update_r53_serviceendpoints(srv_record_name, r53_zone_id):
+def update_r53_serviceendpoints(srv_record_name, r53_zone_id, table):
     priority = 10
     response = table.scan()
     datas = response['Items']
@@ -83,7 +83,7 @@ def update_r53_serviceendpoints(srv_record_name, r53_zone_id):
             return True
 
 
-def get_dynamo_cluster_services(k8s_endpoint):
+def get_dynamo_cluster_services(k8s_endpoint, table):
     try:
         response = table.query(
             IndexName='cluster-index',
@@ -102,7 +102,7 @@ def get_dynamo_cluster_services(k8s_endpoint):
         return({k8s_endpoint: cluster})
 
 
-def add_dynamo_cluster_backend(cluster, endpoint):
+def add_dynamo_cluster_backend(cluster, endpoint, table):
     try:
         bdd_value = "{}:{}".format(endpoint['server'], endpoint['port'])
         response = table.put_item(
@@ -119,7 +119,7 @@ def add_dynamo_cluster_backend(cluster, endpoint):
         return True
 
 
-def del_dynamo_cluster_backend(cluster, endpoint):
+def del_dynamo_cluster_backend(cluster, endpoint, table):
     bdd_value = "{}:{}".format(endpoint['server'], endpoint['port'])
     try:
         response = table.delete_item(
@@ -181,7 +181,7 @@ def diff(listA, listB):
 
 def create_dynamo_table(dynamodb_table_name):
     try:
-        table = dynamodb.create_table(
+        dynamodb.create_table(
             TableName=dynamodb_table_name,
             KeySchema=[
                 {
@@ -228,10 +228,9 @@ def create_dynamo_table(dynamodb_table_name):
         waiter.wait(TableName=dynamodb_table_name)
         logging.info('DynamoDB table {} is created.'.format(
             dynamodb_table_name))
+        return True
     except Exception as e:
         raise(e)
-    else:
-        return True
 
 
 @click.command()
@@ -246,7 +245,6 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoin
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
-    global table
 
     # Check if Dynamo DB Table exists
     try:
@@ -254,9 +252,8 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoin
     except dynamodb_client.exceptions.ResourceNotFoundException:
         # If not, we create the table
         create_dynamo_table(dynamodb_table_name)
-    pass
 
-    table = dynamodb.Table(dynamodb_table_name)
+    dynamo_table = dynamodb.Table(dynamodb_table_name)
 
     try:
         get_k8s_config()
@@ -278,7 +275,7 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoin
     # Do an initial sync between DynamoDB and route53
     try:
         logging.info("Performing initial sync between DynamoDB and route53")
-        update_r53_serviceendpoints(srv_record, r53_zone_id)
+        update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table)
     except Exception as e:
         logging.warning(
             "Initial synchro failed between DynamoDB and route53")
@@ -294,30 +291,31 @@ def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoin
             service_k8s[api_endpoint] = endpoints
 
         # Collects cluster endpoints in the backend
-        service_backend = get_dynamo_cluster_services(api_endpoint)
+        service_backend = get_dynamo_cluster_services(
+            api_endpoint, dynamo_table)
 
         backend_updated = False
         # In k8s but not in backend -> append to backend
         svc_to_add = diff(service_k8s[api_endpoint],
                           service_backend[api_endpoint])
-        if len(svc_to_add) > 0:
+        if svc_to_add:
             for endpoint in svc_to_add:
                 backend_updated = add_dynamo_cluster_backend(
-                    api_endpoint, endpoint)
+                    api_endpoint, endpoint, dynamo_table)
 
         # In backend but not in k8s -> delete in backend
         endpoint_to_delete = diff(
             service_backend[api_endpoint], service_k8s[api_endpoint])
-        if len(endpoint_to_delete) > 0:
+        if endpoint_to_delete:
             for endpoint in endpoint_to_delete:
                 backend_updated = del_dynamo_cluster_backend(
-                    api_endpoint, endpoint)
+                    api_endpoint, endpoint, dynamo_table)
         # If the backend have been updated, r53 sync is needed
         if backend_updated:
             try:
                 t = 0
                 # In case of r53 throttle, we wait for some time and try again
-                while not update_r53_serviceendpoints(srv_record, r53_zone_id) and t < R53_RETRY:
+                while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and t < R53_RETRY:
                     t += 1
                     logging.info("Waiting for {} seconds".format(t*t))
                     time.sleep(t*t)

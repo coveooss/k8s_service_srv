@@ -176,9 +176,9 @@ def diff(listA, listB):
     return [i for i in listA if i not in listB]
 
 
-def create_dynamo_table(dynamodb_table_name, dynamodb, dynamodb_client):
+def create_dynamo_table(dynamodb_table_name, dynamodb_client):
     try:
-        dynamodb.create_table(
+        dynamodb_client.create_table(
             TableName=dynamodb_table_name,
             KeySchema=[
                 {
@@ -243,7 +243,6 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
 
-    dynamodb = boto3.resource('dynamodb', region_name=dynamo_region)
     dynamodb_client = boto3.client('dynamodb', region_name=dynamo_region)
 
     # Check if Dynamo DB Table exists
@@ -253,8 +252,9 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
         dynamodb_client.describe_table(TableName=dynamodb_table_name)
     except dynamodb_client.exceptions.ResourceNotFoundException:
         # If not, we create the table
-        create_dynamo_table(dynamodb_table_name, dynamodb, dynamodb_client)
+        create_dynamo_table(dynamodb_table_name, dynamodb_client)
 
+    dynamodb = boto3.resource('dynamodb', region_name=dynamo_region)
     dynamo_table = dynamodb.Table(dynamodb_table_name)
 
     try:

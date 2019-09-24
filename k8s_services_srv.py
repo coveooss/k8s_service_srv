@@ -237,13 +237,13 @@ def create_dynamo_table(dynamodb_table_name, dynamodb_client):
 @click.option("--r53_zone_id", required=True, default=None, help="Specify route 53 DNS service record to update")
 @click.option("--k8s_endpoint_name", required=False, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
 @click.option("--dynamodb_table_name", required=False, default="r53-service-resolver", help="Specify an alternative DynamoDB table name")
-@click.option("--dynamo_region", "-r", default="us-east-1", help="Region where the DynamoDB table is hosted")
-def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamo_region):
+@click.option("--dynamodb_region", "-r", default="us-east-1", help="Region where the DynamoDB table is hosted")
+def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
 
-    dynamodb_client = boto3.client('dynamodb', region_name=dynamo_region)
+    dynamodb_client = boto3.client('dynamodb', region_name=dynamodb_region)
 
     # Check if Dynamo DB Table exists
     try:
@@ -254,7 +254,7 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
         # If not, we create the table
         create_dynamo_table(dynamodb_table_name, dynamodb_client)
 
-    dynamodb = boto3.resource('dynamodb', region_name=dynamo_region)
+    dynamodb = boto3.resource('dynamodb', region_name=dynamodb_region)
     dynamo_table = dynamodb.Table(dynamodb_table_name)
 
     try:

@@ -13,9 +13,6 @@ K8S_V1_CLIENT = client.CoreV1Api()
 # Constants
 R53_RETRY = 10
 
-dynamodb = boto3.resource('dynamodb')
-dynamodb_client = boto3.client('dynamodb')
-
 
 def get_k8s_config():
     # Try to get k8s local config or use incluster one
@@ -179,9 +176,9 @@ def diff(listA, listB):
     return [i for i in listA if i not in listB]
 
 
-def create_dynamo_table(dynamodb_table_name):
+def create_dynamo_table(dynamodb_table_name, dynamodb_client):
     try:
-        dynamodb.create_table(
+        dynamodb_client.create_table(
             TableName=dynamodb_table_name,
             KeySchema=[
                 {
@@ -234,25 +231,30 @@ def create_dynamo_table(dynamodb_table_name):
 
 
 @click.command()
-@click.option("--region", "-r", default=None, help="Region where to run the script")
 @click.option("--label_selector", default="", help="Specify the service labels to monitor")
 @click.option("--namespace", default="kube-system", help="Specify the service labels to monitor")
 @click.option("--srv_record", required=True, default=None, help="Specify DNS service record to update")
 @click.option("--r53_zone_id", required=True, default=None, help="Specify route 53 DNS service record to update")
 @click.option("--k8s_endpoint_name", required=False, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
 @click.option("--dynamodb_table_name", required=False, default="r53-service-resolver", help="Specify an alternative DynamoDB table name")
-def main(region, label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name):
+@click.option("--dynamodb_region", "-r", default="us-east-1", help="Region where the DynamoDB table is hosted")
+def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
 
+    dynamodb_client = boto3.client('dynamodb', region_name=dynamodb_region)
+
     # Check if Dynamo DB Table exists
     try:
+        logging.info("Connecting to DynamoDB table {}".format(
+            dynamodb_table_name))
         dynamodb_client.describe_table(TableName=dynamodb_table_name)
     except dynamodb_client.exceptions.ResourceNotFoundException:
         # If not, we create the table
-        create_dynamo_table(dynamodb_table_name)
+        create_dynamo_table(dynamodb_table_name, dynamodb_client)
 
+    dynamodb = boto3.resource('dynamodb', region_name=dynamodb_region)
     dynamo_table = dynamodb.Table(dynamodb_table_name)
 
     try:

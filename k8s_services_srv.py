@@ -285,50 +285,52 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
     for event in stream:
         logging.info('K8s service modification detected ({} : {})'.format(
             event['type'], event['object']._metadata.name))
+        if event['type'] != 'ERROR':
+            service_k8s = {}
+            endpoints = list_k8s_services(namespace, label_selector)
+            # If cluster have no valid erndpoint, we ignore it
+            if len(endpoints) > 0:
+                service_k8s[api_endpoint] = endpoints
 
-        service_k8s = {}
-        endpoints = list_k8s_services(namespace, label_selector)
-        # If cluster have no valid erndpoint, we ignore it
-        if len(endpoints) > 0:
-            service_k8s[api_endpoint] = endpoints
+            # Collects cluster endpoints in the backend
+            service_backend = get_dynamo_cluster_services(
+                api_endpoint, dynamo_table)
 
-        # Collects cluster endpoints in the backend
-        service_backend = get_dynamo_cluster_services(
-            api_endpoint, dynamo_table)
+            backend_updated = False
+            # In k8s but not in backend -> append to backend
+            svc_to_add = diff(service_k8s[api_endpoint],
+                              service_backend[api_endpoint])
+            if svc_to_add:
+                for endpoint in svc_to_add:
+                    backend_updated = add_dynamo_cluster_backend(
+                        api_endpoint, endpoint, dynamo_table)
 
-        backend_updated = False
-        # In k8s but not in backend -> append to backend
-        svc_to_add = diff(service_k8s[api_endpoint],
-                          service_backend[api_endpoint])
-        if svc_to_add:
-            for endpoint in svc_to_add:
-                backend_updated = add_dynamo_cluster_backend(
-                    api_endpoint, endpoint, dynamo_table)
+            # In backend but not in k8s -> delete in backend
+            endpoint_to_delete = diff(
+                service_backend[api_endpoint], service_k8s[api_endpoint])
+            if endpoint_to_delete:
+                for endpoint in endpoint_to_delete:
+                    backend_updated = del_dynamo_cluster_backend(
+                        api_endpoint, endpoint, dynamo_table)
+            # If the backend have been updated, r53 sync is needed
+            if backend_updated:
+                try:
+                    t = 0
+                    # In case of r53 throttle, we wait for some time and try again
+                    while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and t < R53_RETRY:
+                        t += 1
+                        logging.info("Waiting for {} seconds".format(t*t))
+                        time.sleep(t*t)
+                        if t >= R53_RETRY:
+                            raise(Exception("Error updating r53 info, exiting"))
 
-        # In backend but not in k8s -> delete in backend
-        endpoint_to_delete = diff(
-            service_backend[api_endpoint], service_k8s[api_endpoint])
-        if endpoint_to_delete:
-            for endpoint in endpoint_to_delete:
-                backend_updated = del_dynamo_cluster_backend(
-                    api_endpoint, endpoint, dynamo_table)
-        # If the backend have been updated, r53 sync is needed
-        if backend_updated:
-            try:
-                t = 0
-                # In case of r53 throttle, we wait for some time and try again
-                while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and t < R53_RETRY:
-                    t += 1
-                    logging.info("Waiting for {} seconds".format(t*t))
-                    time.sleep(t*t)
-                    if t >= R53_RETRY:
-                        raise(Exception("Error updating r53 info, exiting"))
-
-            except Exception as e:
-                raise(e)
+                except Exception as e:
+                    raise(e)
+            else:
+                logging.info(
+                    'K8s service modification detected but no DNS update is required')
         else:
-            logging.info(
-                'K8s service modification detected but no DNS update is required')
+            raise(Exception('Error on k8s API update'))
 
 
 if __name__ == '__main__':

@@ -9,7 +9,7 @@ from boto3.dynamodb.conditions import Key, Attr
 
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
-K8S_WHITELISTED_EVENTS = ["ADDED", "MODIFIED", "DELETED"]
+K8S_WATCHED_EVENTS = ["ADDED", "MODIFIED", "DELETED"]
 
 # Constants
 R53_RETRY = 10

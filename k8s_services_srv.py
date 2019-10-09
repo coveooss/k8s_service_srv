@@ -9,6 +9,7 @@ from boto3.dynamodb.conditions import Key, Attr
 
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
+K8S_WHITELISTED_EVENTS = ["ADDED", "MODIFIED", "DELETED"]
 
 # Constants
 R53_RETRY = 10
@@ -285,7 +286,7 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
     for event in stream:
         logging.info('K8s service modification detected ({} : {})'.format(
             event['type'], event['object']._metadata.name))
-        if event['type'] != 'ERROR':
+        if event['type'] in K8S_WHITELISTED_EVENTS:
             service_k8s = {}
             endpoints = list_k8s_services(namespace, label_selector)
             # If cluster have no valid erndpoint, we ignore it

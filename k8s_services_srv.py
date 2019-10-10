@@ -243,7 +243,6 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     global K8S_V1_CLIENT
-    global K8S_WATCHED_EVENTS
 
     dynamodb_client = boto3.client('dynamodb', region_name=dynamodb_region)
 

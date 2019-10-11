@@ -35,13 +35,13 @@ def update_r53_serviceendpoints(srv_record_name, r53_zone_id, table):
     response = table.scan()
     datas = response['Items']
     srv_record = []
-    i = 0
+    index = 0
     if len(datas) > 0:
         for data in datas:
-            i += 1
+            index += 1
             endpoint_dict = (data['endpoint']).split(':')
             srv_record.append({"Value": "{} {} {} {}".format(
-                i, priority, endpoint_dict[1], endpoint_dict[0])})
+                index, priority, endpoint_dict[1], endpoint_dict[0])})
     else:
         # No data in DynamoDB
         logging.info("No data in DynamoDB backend, skipping synchro")
@@ -173,8 +173,8 @@ def get_k8s_endpoint_node(name, namespace):
             return ""
 
 
-def diff(listA, listB):
-    return [i for i in listA if i not in listB]
+def diff(list_a, list_b):
+    return [i for i in list_a if i not in list_b]
 
 
 def create_dynamo_table(dynamodb_table_name, dynamodb_client):
@@ -261,9 +261,9 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
     try:
         get_k8s_config()
         K8S_V1_CLIENT = client.CoreV1Api()
-        w = watch.Watch()
+        k8s_watch = watch.Watch()
         if not k8s_endpoint_name:
-            api_endpoint_url = w._api_client.configuration.host
+            api_endpoint_url = k8s_watch._api_client.configuration.host
             api_endpoint = api_endpoint_url.replace('https://', "")
         else:
             api_endpoint = k8s_endpoint_name
@@ -272,8 +272,8 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
         raise(Exception("Error connection k8s API {}".format(e)))
 
     logging.info("Watching k8s API for serice change")
-    stream = w.stream(K8S_V1_CLIENT.list_namespaced_service,
-                      namespace=namespace, label_selector=label_selector)
+    stream = k8s_watch.stream(K8S_V1_CLIENT.list_namespaced_service,
+                              namespace=namespace, label_selector=label_selector)
 
     # Do an initial sync between DynamoDB and route53
     try:
@@ -316,13 +316,14 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
             # If the backend have been updated, r53 sync is needed
             if backend_updated:
                 try:
-                    t = 0
+                    retry_count = 0
                     # In case of r53 throttle, we wait for some time and try again
-                    while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and t < R53_RETRY:
-                        t += 1
-                        logging.info("Waiting for {} seconds".format(t*t))
-                        time.sleep(t*t)
-                        if t >= R53_RETRY:
+                    while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and retry_count < R53_RETRY:
+                        retry_count += 1
+                        logging.info(
+                            "Waiting for {} seconds".format(retry_count*retry_count))
+                        time.sleep(retry_count*retry_count)
+                        if retry_count >= R53_RETRY:
                             raise(Exception("Error updating r53 info, exiting"))
 
                 except Exception as e:

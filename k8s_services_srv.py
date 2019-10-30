@@ -166,7 +166,7 @@ def get_k8s_endpoint_node(name, namespace):
         return ""
     else:
         try:
-            return node_name._items[0]._subsets[0]._addresses[0].node_name
+            return node_name._items[0]._subsets[0]._addresses[0].ip
         except Exception as e:
             logging.warning(
                 "k8s endpoints have no target ({})".format(e))
@@ -289,7 +289,7 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
         if event['type'] in K8S_WATCHED_EVENTS:
             service_k8s = {}
             endpoints = list_k8s_services(namespace, label_selector)
-            # If cluster have no valid erndpoint, we ignore it
+            # If cluster have no valid endpoint, we ignore it
             if len(endpoints) > 0:
                 service_k8s[api_endpoint] = endpoints
 

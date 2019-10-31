@@ -6,6 +6,7 @@ import logging
 import urllib3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key, Attr
+import socket
 
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
@@ -142,7 +143,7 @@ def list_k8s_services(namespace, label_selector):
         for item in service.items:
             server = get_k8s_endpoint_node(item.metadata.name, namespace)
             if server:
-                for port in item._spec._ports:
+                for port in item.spec.ports:
                     services_list.append({
                         "server": server,
                         "port": port.node_port
@@ -151,6 +152,13 @@ def list_k8s_services(namespace, label_selector):
     except Exception as e:
         raise(Exception("Unexpected k8s API response : {}".format(e)))
 
+def get_node_ip(node_name):
+    try:
+        ip_address = socket.gethostbyname(node_name)
+    except:
+        node = K8S_V1_CLIENT.read_node(node_name)
+        ip_address = next((ips.address for ips in node.status.addresses if ips.type == "InternalIP"))
+    return ip_address
 
 def get_k8s_endpoint_node(name, namespace):
     # Get the node hosting the PODs
@@ -160,13 +168,13 @@ def get_k8s_endpoint_node(name, namespace):
     except Exception as e:
         raise(Exception("Unexpected k8s API response : {}".format(e)))
 
-    if (len(node_name._items) > 1 or len(node_name._items) == 0):
+    if len(node_name.items) > 1 or len(node_name.items) == 0:
         logging.error(
             "Unexpected k8s Endpoint response for endpoints matching name: {}".format(name))
         return ""
     else:
         try:
-            return node_name._items[0]._subsets[0]._addresses[0].ip
+            return get_node_ip(node_name.items[0].subsets[0].addresses[0].node_name)
         except Exception as e:
             logging.warning(
                 "k8s endpoints have no target ({})".format(e))

@@ -155,6 +155,11 @@ def list_k8s_services(namespace, label_selector):
 
 
 def get_node_hostname(node_name):
+    """
+    Grab EC2 Tag "Name" and suffix it by the R53 domain name.
+    :param node_name:
+    :return: Dns instance Name as registered in R53
+    """
     ec2_client = boto3.client('ec2', region_name=REGION)
     options = {"Filters": [
         {
@@ -168,6 +173,7 @@ def get_node_hostname(node_name):
     else:
         raise Exception("Node not found or more than one result retrieved")
     return "{}.{}".format(instance_name, DOMAIN_NAME)
+
 
 def get_k8s_endpoint_node(name, namespace):
     # Get the node hosting the PODs
@@ -256,7 +262,7 @@ def create_dynamo_table(dynamodb_table_name, dynamodb_client):
 @click.option("--k8s_endpoint_name", required=False, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
 @click.option("--dynamodb_table_name", required=False, default="r53-service-resolver", help="Specify an alternative DynamoDB table name")
 @click.option("--dynamodb_region", default="us-east-1", help="Region where the DynamoDB table is hosted")
-@click.option("--region", "-r", default="us-east-1", help="Region where the DynamoDB table is hosted")
+@click.option("--region", "-r", default="us-east-1", help="AWS region")
 def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region, region):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)

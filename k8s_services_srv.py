@@ -6,11 +6,12 @@ import logging
 import urllib3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key, Attr
-import socket
 
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
 K8S_WATCHED_EVENTS = ["ADDED", "MODIFIED", "DELETED"]
+REGION = ""
+DOMAIN_NAME = ""
 
 # Constants
 R53_RETRY = 10
@@ -152,13 +153,21 @@ def list_k8s_services(namespace, label_selector):
     except Exception as e:
         raise(Exception("Unexpected k8s API response : {}".format(e)))
 
-def get_node_ip(node_name):
-    try:
-        ip_address = socket.gethostbyname(node_name)
-    except:
-        node = K8S_V1_CLIENT.read_node(node_name)
-        ip_address = next((ips.address for ips in node.status.addresses if ips.type == "InternalIP"))
-    return ip_address
+
+def get_node_hostname(node_name):
+    ec2_client = boto3.client('ec2', region_name=REGION)
+    options = {"Filters": [
+        {
+            'Name': 'private-dns-name',
+            'Values': [node_name]
+        },
+    ]}
+    rsp = ec2_client.describe_instances(**options)
+    if len(rsp['Reservations']) == 1:
+        instance_name = next((tag["Value"] for tag in rsp['Reservations'][0]['Instances'][0]['Tags'] if tag['Key'] == 'Name'))
+    else:
+        raise Exception("Node not found or more than one result retrieved")
+    return "{}.{}".format(instance_name, DOMAIN_NAME)
 
 def get_k8s_endpoint_node(name, namespace):
     # Get the node hosting the PODs
@@ -174,7 +183,7 @@ def get_k8s_endpoint_node(name, namespace):
         return ""
     else:
         try:
-            return get_node_ip(node_name.items[0].subsets[0].addresses[0].node_name)
+            return get_node_hostname(node_name.items[0].subsets[0].addresses[0].node_name)
         except Exception as e:
             logging.warning(
                 "k8s endpoints have no target ({})".format(e))
@@ -246,13 +255,18 @@ def create_dynamo_table(dynamodb_table_name, dynamodb_client):
 @click.option("--r53_zone_id", required=True, default=None, help="Specify route 53 DNS service record to update")
 @click.option("--k8s_endpoint_name", required=False, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
 @click.option("--dynamodb_table_name", required=False, default="r53-service-resolver", help="Specify an alternative DynamoDB table name")
-@click.option("--dynamodb_region", "-r", default="us-east-1", help="Region where the DynamoDB table is hosted")
-def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region):
+@click.option("--dynamodb_region", default="us-east-1", help="Region where the DynamoDB table is hosted")
+@click.option("--region", "-r", default="us-east-1", help="Region where the DynamoDB table is hosted")
+def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region, region):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-    global K8S_V1_CLIENT
+    global K8S_V1_CLIENT, REGION, DOMAIN_NAME
+
+    REGION = region
 
     dynamodb_client = boto3.client('dynamodb', region_name=dynamodb_region)
+    r53 = boto3.client('route53')
+    DOMAIN_NAME = r53.get_hosted_zone(Id=r53_zone_id)["HostedZone"]["Name"]
 
     # Check if Dynamo DB Table exists
     try:

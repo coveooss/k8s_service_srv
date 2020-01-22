@@ -271,68 +271,75 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
     except Exception as e:
         raise(Exception("Error connection k8s API {}".format(e)))
 
-    logging.info("Watching k8s API for serice change")
-    stream = w.stream(K8S_V1_CLIENT.list_namespaced_service,
-                      namespace=namespace, label_selector=label_selector)
+    while True:
+        logging.info("Watching k8s API for serice change")
+        stream = w.stream(K8S_V1_CLIENT.list_namespaced_service,
+                          namespace=namespace, label_selector=label_selector, _request_timeout=60)
 
-    # Do an initial sync between DynamoDB and route53
-    try:
-        logging.info("Performing initial sync between DynamoDB and route53")
-        update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table)
-    except Exception as e:
-        logging.warning(
-            "Initial synchro failed between DynamoDB and route53")
+        # Do an initial sync between DynamoDB and route53
+        try:
+            logging.info(
+                "Performing full sync between DynamoDB and route53")
+            update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table)
+        except Exception as e:
+            logging.warning(
+                "Full synchro failed between DynamoDB and route53")
+        try:
+            for event in stream:
+                logging.info('K8s service modification detected ({} : {})'.format(
+                    event['type'], event['object']._metadata.name))
+                if event['type'] in K8S_WATCHED_EVENTS:
+                    service_k8s = {}
+                    endpoints = list_k8s_services(namespace, label_selector)
+                    # If cluster have no valid erndpoint, we ignore it
+                    if len(endpoints) > 0:
+                        service_k8s[api_endpoint] = endpoints
 
-    for event in stream:
-        logging.info('K8s service modification detected ({} : {})'.format(
-            event['type'], event['object']._metadata.name))
-        if event['type'] in K8S_WATCHED_EVENTS:
-            service_k8s = {}
-            endpoints = list_k8s_services(namespace, label_selector)
-            # If cluster have no valid erndpoint, we ignore it
-            if len(endpoints) > 0:
-                service_k8s[api_endpoint] = endpoints
+                    # Collects cluster endpoints in the backend
+                    service_backend = get_dynamo_cluster_services(
+                        api_endpoint, dynamo_table)
 
-            # Collects cluster endpoints in the backend
-            service_backend = get_dynamo_cluster_services(
-                api_endpoint, dynamo_table)
+                    backend_updated = False
+                    # In k8s but not in backend -> append to backend
+                    svc_to_add = diff(service_k8s[api_endpoint],
+                                      service_backend[api_endpoint])
+                    if svc_to_add:
+                        for endpoint in svc_to_add:
+                            backend_updated = add_dynamo_cluster_backend(
+                                api_endpoint, endpoint, dynamo_table)
 
-            backend_updated = False
-            # In k8s but not in backend -> append to backend
-            svc_to_add = diff(service_k8s[api_endpoint],
-                              service_backend[api_endpoint])
-            if svc_to_add:
-                for endpoint in svc_to_add:
-                    backend_updated = add_dynamo_cluster_backend(
-                        api_endpoint, endpoint, dynamo_table)
+                    # In backend but not in k8s -> delete in backend
+                    endpoint_to_delete = diff(
+                        service_backend[api_endpoint], service_k8s[api_endpoint])
+                    if endpoint_to_delete:
+                        for endpoint in endpoint_to_delete:
+                            backend_updated = del_dynamo_cluster_backend(
+                                api_endpoint, endpoint, dynamo_table)
+                    # If the backend have been updated, r53 sync is needed
+                    if backend_updated:
+                        try:
+                            t = 0
+                            # In case of r53 throttle, we wait for some time and try again
+                            while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and t < R53_RETRY:
+                                t += 1
+                                logging.info(
+                                    "Waiting for {} seconds".format(t*t))
+                                time.sleep(t*t)
+                                if t >= R53_RETRY:
+                                    raise(
+                                        Exception("Error updating r53 info, exiting"))
 
-            # In backend but not in k8s -> delete in backend
-            endpoint_to_delete = diff(
-                service_backend[api_endpoint], service_k8s[api_endpoint])
-            if endpoint_to_delete:
-                for endpoint in endpoint_to_delete:
-                    backend_updated = del_dynamo_cluster_backend(
-                        api_endpoint, endpoint, dynamo_table)
-            # If the backend have been updated, r53 sync is needed
-            if backend_updated:
-                try:
-                    t = 0
-                    # In case of r53 throttle, we wait for some time and try again
-                    while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and t < R53_RETRY:
-                        t += 1
-                        logging.info("Waiting for {} seconds".format(t*t))
-                        time.sleep(t*t)
-                        if t >= R53_RETRY:
-                            raise(Exception("Error updating r53 info, exiting"))
-
-                except Exception as e:
-                    raise(e)
-            else:
-                logging.info(
-                    'K8s service modification detected but no DNS update is required')
-        else:
-            logging.error("Unmanaged event type : {}".format(event['type']))
-            logging.error(event)
+                        except Exception as e:
+                            raise(e)
+                    else:
+                        logging.info(
+                            'K8s service modification detected but no DNS update is required')
+                else:
+                    logging.error(
+                        "Unmanaged event type : {}".format(event['type']))
+                    logging.error(event)
+        except Exception as e:
+            logging.info(e)
 
 
 if __name__ == '__main__':

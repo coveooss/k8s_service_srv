@@ -331,7 +331,8 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
                 logging.info(
                     'K8s service modification detected but no DNS update is required')
         else:
-            raise(Exception('Error on k8s API update'))
+            logging.error("Unmanaged event type : {}".format(event['type']))
+            logging.error(event)
 
 
 if __name__ == '__main__':

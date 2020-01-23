@@ -10,6 +10,8 @@ from boto3.dynamodb.conditions import Key, Attr
 # Global variable
 K8S_V1_CLIENT = client.CoreV1Api()
 K8S_WATCHED_EVENTS = ["ADDED", "MODIFIED", "DELETED"]
+REGION = ""
+DOMAIN_NAME = ""
 
 # Constants
 R53_RETRY = 10
@@ -35,13 +37,13 @@ def update_r53_serviceendpoints(srv_record_name, r53_zone_id, table):
     response = table.scan()
     datas = response['Items']
     srv_record = []
-    i = 0
+    index = 0
     if len(datas) > 0:
         for data in datas:
-            i += 1
+            index += 1
             endpoint_dict = (data['endpoint']).split(':')
             srv_record.append({"Value": "{} {} {} {}".format(
-                i, priority, endpoint_dict[1], endpoint_dict[0])})
+                index, priority, endpoint_dict[1], endpoint_dict[0])})
     else:
         # No data in DynamoDB
         logging.info("No data in DynamoDB backend, skipping synchro")
@@ -144,7 +146,7 @@ def list_k8s_services(namespace, label_selector):
         for item in service.items:
             server = get_k8s_endpoint_node(item.metadata.name, namespace)
             if server:
-                for port in item._spec._ports:
+                for port in item.spec.ports:
                     services_list.append({
                         "server": server,
                         "port": port.node_port
@@ -152,6 +154,28 @@ def list_k8s_services(namespace, label_selector):
         return services_list
     except Exception as e:
         raise(Exception("Unexpected k8s API response : {}".format(e)))
+
+
+def get_node_hostname(node_name):
+    """
+    Grab EC2 Tag "Name" and suffix it by the R53 domain name.
+    :param node_name:
+    :return: Dns instance Name as registered in R53
+    """
+    ec2_client = boto3.client('ec2', region_name=REGION)
+    options = {"Filters": [
+        {
+            'Name': 'private-dns-name',
+            'Values': [node_name]
+        },
+    ]}
+    rsp = ec2_client.describe_instances(**options)
+    if len(rsp['Reservations']) == 1:
+        instance_name = next((tag["Value"] for tag in rsp['Reservations']
+                              [0]['Instances'][0]['Tags'] if tag['Key'] == 'Name'))
+    else:
+        raise Exception("Node not found or more than one result retrieved")
+    return "{}.{}".format(instance_name, DOMAIN_NAME)
 
 
 def get_k8s_endpoint_node(name, namespace):
@@ -162,21 +186,21 @@ def get_k8s_endpoint_node(name, namespace):
     except Exception as e:
         raise(Exception("Unexpected k8s API response : {}".format(e)))
 
-    if (len(node_name._items) > 1 or len(node_name._items) == 0):
+    if len(node_name.items) > 1 or len(node_name.items) == 0:
         logging.error(
             "Unexpected k8s Endpoint response for endpoints matching name: {}".format(name))
         return ""
     else:
         try:
-            return node_name._items[0]._subsets[0]._addresses[0].node_name
+            return get_node_hostname(node_name.items[0].subsets[0].addresses[0].node_name)
         except Exception as e:
             logging.warning(
                 "k8s endpoints have no target ({})".format(e))
             return ""
 
 
-def diff(listA, listB):
-    return [i for i in listA if i not in listB]
+def diff(list_a, list_b):
+    return [i for i in list_a if i not in list_b]
 
 
 def create_dynamo_table(dynamodb_table_name, dynamodb_client):
@@ -240,13 +264,18 @@ def create_dynamo_table(dynamodb_table_name, dynamodb_client):
 @click.option("--r53_zone_id", required=True, default=None, help="Specify route 53 DNS service record to update")
 @click.option("--k8s_endpoint_name", required=False, default=None, help="Specify an alternative k8s endpoint name to store in r53 TXT record")
 @click.option("--dynamodb_table_name", required=False, default="r53-service-resolver", help="Specify an alternative DynamoDB table name")
-@click.option("--dynamodb_region", "-r", default="us-east-1", help="Region where the DynamoDB table is hosted")
-def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region):
+@click.option("--dynamodb_region", default="us-east-1", help="Region where the DynamoDB table is hosted")
+@click.option("--region", "-r", default="us-east-1", help="AWS region")
+def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region, region):
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-    global K8S_V1_CLIENT
+    global K8S_V1_CLIENT, REGION, DOMAIN_NAME
+
+    REGION = region
 
     dynamodb_client = boto3.client('dynamodb', region_name=dynamodb_region)
+    r53 = boto3.client('route53')
+    DOMAIN_NAME = r53.get_hosted_zone(Id=r53_zone_id)["HostedZone"]["Name"]
 
     # Check if Dynamo DB Table exists
     try:
@@ -263,9 +292,9 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
     try:
         get_k8s_config()
         K8S_V1_CLIENT = client.CoreV1Api()
-        w = watch.Watch()
+        k8s_watch = watch.Watch()
         if not k8s_endpoint_name:
-            api_endpoint_url = w._api_client.configuration.host
+            api_endpoint_url = k8s_watch._api_client.configuration.host
             api_endpoint = api_endpoint_url.replace('https://', "")
         else:
             api_endpoint = k8s_endpoint_name
@@ -273,75 +302,69 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
     except Exception as e:
         raise(Exception("Error connection k8s API {}".format(e)))
 
-    while True:
-        logging.info("Watching k8s API for serice change")
-        stream = w.stream(K8S_V1_CLIENT.list_namespaced_service,
-                          namespace=namespace, label_selector=label_selector, _request_timeout=60)
+    logging.info("Watching k8s API for serice change")
+    stream = k8s_watch.stream(K8S_V1_CLIENT.list_namespaced_service,
+                              namespace=namespace, label_selector=label_selector)
 
-        # Do an initial sync between DynamoDB and route53
-        try:
-            logging.info(
-                "Performing full sync between DynamoDB and route53")
-            update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table)
-        except Exception as e:
-            logging.warning(
-                "Full synchro failed between DynamoDB and route53")
-        try:
-            for event in stream:
-                logging.info('K8s service modification detected ({} : {})'.format(
-                    event['type'], event['object']._metadata.name))
-                if event['type'] in K8S_WATCHED_EVENTS:
-                    service_k8s = {}
-                    endpoints = list_k8s_services(namespace, label_selector)
-                    # If cluster have no valid erndpoint, we ignore it
-                    if len(endpoints) > 0:
-                        service_k8s[api_endpoint] = endpoints
+    # Do an initial sync between DynamoDB and route53
+    try:
+        logging.info("Performing initial sync between DynamoDB and route53")
+        update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table)
+    except Exception as e:
+        logging.warning(
+            "Initial synchro failed between DynamoDB and route53")
 
-                    # Collects cluster endpoints in the backend
-                    service_backend = get_dynamo_cluster_services(
-                        api_endpoint, dynamo_table)
+    for event in stream:
+        logging.info('K8s service modification detected ({} : {})'.format(
+            event['type'], event['object']._metadata.name))
+        if event['type'] in K8S_WATCHED_EVENTS:
+            service_k8s = {}
+            endpoints = list_k8s_services(namespace, label_selector)
+            # If cluster have no valid endpoint, we ignore it
+            if len(endpoints) > 0:
+                service_k8s[api_endpoint] = endpoints
 
-                    backend_updated = False
-                    # In k8s but not in backend -> append to backend
-                    svc_to_add = diff(service_k8s[api_endpoint],
-                                      service_backend[api_endpoint])
-                    if svc_to_add:
-                        for endpoint in svc_to_add:
-                            backend_updated = add_dynamo_cluster_backend(
-                                api_endpoint, endpoint, dynamo_table)
+            # Collects cluster endpoints in the backend
+            service_backend = get_dynamo_cluster_services(
+                api_endpoint, dynamo_table)
 
-                    # In backend but not in k8s -> delete in backend
-                    endpoint_to_delete = diff(
-                        service_backend[api_endpoint], service_k8s[api_endpoint])
-                    if endpoint_to_delete:
-                        for endpoint in endpoint_to_delete:
-                            backend_updated = del_dynamo_cluster_backend(
-                                api_endpoint, endpoint, dynamo_table)
-                    # If the backend have been updated, r53 sync is needed
-                    if backend_updated:
-                        try:
-                            t = 0
-                            # In case of r53 throttle, we wait for some time and try again
-                            while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and t < R53_RETRY:
-                                t += 1
-                                logging.info(
-                                    "Waiting for {} seconds".format(t*t))
-                                time.sleep(t*t)
-                                if t >= R53_RETRY:
-                                    raise(
-                                        Exception("Error updating r53 info, exiting"))
+            backend_updated = False
+            # In k8s but not in backend -> append to backend
+            svc_to_add = diff(service_k8s[api_endpoint],
+                              service_backend[api_endpoint])
+            if svc_to_add:
+                for endpoint in svc_to_add:
+                    backend_updated = add_dynamo_cluster_backend(
+                        api_endpoint, endpoint, dynamo_table)
 
-                        except Exception as e:
-                            raise(e)
-                    else:
+            # In backend but not in k8s -> delete in backend
+            endpoint_to_delete = diff(
+                service_backend[api_endpoint], service_k8s[api_endpoint])
+            if endpoint_to_delete:
+                for endpoint in endpoint_to_delete:
+                    backend_updated = del_dynamo_cluster_backend(
+                        api_endpoint, endpoint, dynamo_table)
+            # If the backend have been updated, r53 sync is needed
+            if backend_updated:
+                try:
+                    retry_count = 0
+                    # In case of r53 throttle, we wait for some time and try again
+                    while not update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table) and retry_count < R53_RETRY:
+                        retry_count += 1
                         logging.info(
-                            'K8s service modification detected but no DNS update is required')
-                else:
-                    logging.error(
-                        "Unmanaged event type : {}".format(event['type']))
-                    logging.error(event)
-        except Exception as e:
-            logging.info(e)
+                            "Waiting for {} seconds".format(retry_count*retry_count))
+                        time.sleep(retry_count*retry_count)
+                        if retry_count >= R53_RETRY:
+                            raise(Exception("Error updating r53 info, exiting"))
+
+                except Exception as e:
+                    raise(e)
+            else:
+                logging.info(
+                    'K8s service modification detected but no DNS update is required')
+        else:
+            logging.warning("Unmanaged event type : {}".format(event['type']))
+            logging.warning(event)
 
 
 if __name__ == '__main__':

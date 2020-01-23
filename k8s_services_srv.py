@@ -94,6 +94,7 @@ def get_dynamo_cluster_services(k8s_endpoint, table):
         cluster = []
         for item in items:
             endpoint_obj = (item['endpoint']).split(':')
+            # TODO : intégrer la gestion du TTL
             cluster.append(
                 {'server': endpoint_obj[0], 'port': int(endpoint_obj[1])})
 
@@ -106,7 +107,8 @@ def add_dynamo_cluster_backend(cluster, endpoint, table):
         response = table.put_item(
             Item={
                 'endpoint': bdd_value,
-                'cluster': cluster
+                'cluster': cluster,
+                'last_seen': time.time()
             }
         )
     except Exception as e:

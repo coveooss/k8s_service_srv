@@ -139,8 +139,8 @@ def clean_dynamo_cluster_backend(table):
     # Cleaning endpoints with expired TTL
     logging.info("Cleaning up the DB backend")
     response = table.scan()
-    items = response['Items']
-    for item in items:
+
+    for item in response['Items']:
 
         # To manage migration from non TTL records
         if 'last_seen' not in item:
@@ -278,13 +278,10 @@ def create_dynamo_table(dynamodb_table_name, dynamodb_client):
 @click.option("--dynamodb_table_name", required=False, default="r53-service-resolver", help="Specify an alternative DynamoDB table name")
 @click.option("--dynamodb_region", required=False, default="us-east-1", help="Region where the DynamoDB table is hosted")
 @click.option("--region", "-r", required=False, default="us-east-1", help="AWS region")
-@click.option("--debug", "-d", required=False, is_flag=True, default=False, help="Enable debug mode")
-def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region, region, debug):
+@click.option("--log-level", type=click.Choice(["info", "debug", "warning", "error"], case_sensitive=True), required=False, default="info", help="Change log level")
+def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, dynamodb_table_name, dynamodb_region, region, log_level):
 
-    if debug:
-        logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.DEBUG)
-    else:
-        logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=log_level.upper())
 
     global K8S_V1_CLIENT, REGION, DOMAIN_NAME, TTL
 
@@ -319,17 +316,10 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
     except Exception as e:
         raise(Exception("Error connection k8s API {}".format(e)))
     while True:
-        logging.info("Watching k8s API for serice change")
+        logging.info("Watching k8s API for service change")
         stream = k8s_watch.stream(K8S_V1_CLIENT.list_namespaced_service, namespace=namespace,
                                   label_selector=label_selector, _request_timeout=DBCLEANUP_FREQ)
 
-        # Do an initial sync between DynamoDB and route53
-        try:
-            logging.info("Performing full sync between DynamoDB and route53")
-            update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table)
-        except Exception as e:
-            logging.warning(
-                "Full synchro failed between DynamoDB and route53")
         try:
             for event in stream:
                 logging.info('K8s service modification detected ({} : {})'.format(
@@ -363,8 +353,17 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
                     logging.warning("Unmanaged event type : {}".format(event['type']))
                     logging.warning(event)
         except(ReadTimeoutError):
+
             # Remove old backend elements
             clean_dynamo_cluster_backend(dynamo_table)
+
+            try:
+                logging.info("Performing full sync between DynamoDB and route53")
+                update_r53_serviceendpoints(srv_record, r53_zone_id, dynamo_table)
+            except Exception as e:
+                logging.warning(
+                    "Full synchro failed between DynamoDB and route53")
+
         except Exception as e:
             raise(e)
 

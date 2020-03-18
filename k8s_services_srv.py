@@ -317,6 +317,7 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
         raise(Exception("Error connection k8s API {}".format(e)))
 
     while True:
+        K8S_V1_CLIENT = client.CoreV1Api()
         k8s_watch = watch.Watch()
         logging.info("Watching k8s API for service change")
         try:

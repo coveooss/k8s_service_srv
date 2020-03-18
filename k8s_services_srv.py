@@ -315,12 +315,13 @@ def main(label_selector, namespace, srv_record, r53_zone_id, k8s_endpoint_name, 
 
     except Exception as e:
         raise(Exception("Error connection k8s API {}".format(e)))
-    while True:
-        logging.info("Watching k8s API for service change")
-        stream = k8s_watch.stream(K8S_V1_CLIENT.list_namespaced_service, namespace=namespace,
-                                  label_selector=label_selector, _request_timeout=DBCLEANUP_FREQ)
 
+    while True:
+        k8s_watch = watch.Watch()
+        logging.info("Watching k8s API for service change")
         try:
+            stream = k8s_watch.stream(K8S_V1_CLIENT.list_namespaced_service, namespace=namespace,
+                                      label_selector=label_selector, _request_timeout=DBCLEANUP_FREQ)
             for event in stream:
                 logging.info('K8s service modification detected ({} : {})'.format(
                     event['type'], event['object']._metadata.name))
